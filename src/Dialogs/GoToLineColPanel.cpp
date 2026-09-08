@@ -1,8 +1,6 @@
 #include "GoToLineColPanel.h"
 #include "PreferencesDialog.h"
 #include "AboutDialog.h"
-#include "../../qt/CursorInfo.h"
-#include "../../qt/NavigationCore.h"
 #include <wchar.h>
 
 extern HINSTANCE _gModule;
@@ -298,21 +296,32 @@ void GotoLineColPanel::onPanelResize(LPARAM lParam) {
 
 
 intptr_t GotoLineColPanel::getLineMaxPos(intptr_t line) const {
-   HWND editor = GetCurrentScintilla();
-   if (!editor) return -1;
-   return GotoCore::getLineMaxPos([editor](unsigned int m, uintptr_t w, intptr_t l) {
-      return SendMessage(editor, m, w, l);
-   }, allPrefs.useByteCol != 0, line);
+   HWND hScintilla{ GetCurrentScintilla() };
+   if (!hScintilla) return -1;
+
+   intptr_t endPos = SendMessage(hScintilla, SCI_GETLINEENDPOSITION, line - 1, 0);
+
+   intptr_t col = (allPrefs.useByteCol) ?
+      endPos - SendMessage(hScintilla, SCI_POSITIONFROMLINE, line - 1, 0) : SendMessage(hScintilla, SCI_GETCOLUMN, endPos, 0);
+
+   return col + 1;
+};
+
+intptr_t GotoLineColPanel::getDocumentColumn(HWND hScintilla, intptr_t pos, intptr_t line) const {
+   intptr_t col = (allPrefs.useByteCol) ?
+      pos - SendMessage(hScintilla, SCI_POSITIONFROMLINE, line - 1, 0) : SendMessage(hScintilla, SCI_GETCOLUMN, pos, 0);
+
+   return col + 1;
 }
-intptr_t GotoLineColPanel::getDocumentColumn(HWND editor, intptr_t pos, intptr_t line) const {
-   return GotoCore::getDocumentColumn([editor](unsigned int m, uintptr_t w, intptr_t l) {
-      return SendMessage(editor, m, w, l);
-   }, allPrefs.useByteCol != 0, pos, line);
-}
-intptr_t GotoLineColPanel::setDocumentColumn(HWND editor, intptr_t line, intptr_t start, intptr_t max, intptr_t column) const {
-   return GotoCore::setDocumentColumn([editor](unsigned int m, uintptr_t w, intptr_t l) {
-      return SendMessage(editor, m, w, l);
-   }, allPrefs.useByteCol != 0, line, start, max, column);
+
+intptr_t GotoLineColPanel::setDocumentColumn(HWND hScintilla, intptr_t line, intptr_t lineStartPos, intptr_t lineMaxPos, intptr_t column) const {
+   column = (column < 1) ? 1 :
+      (column > lineMaxPos) ? lineMaxPos : column;
+
+   intptr_t gotoPos = (allPrefs.useByteCol) ? lineStartPos + column - 1 : SendMessage(hScintilla, SCI_FINDCOLUMN, line - 1, column - 1);
+
+   SendMessage(hScintilla, SCI_GOTOPOS, gotoPos, 0);
+   return gotoPos;
 }
 
 intptr_t GotoLineColPanel::getInputLineValidated() {
@@ -433,10 +442,99 @@ int GotoLineColPanel::navigateToColPos(intptr_t line, intptr_t column) {
 
 
 void GotoLineColPanel::initCursorPosData(HWND hScintilla, intptr_t line, intptr_t column, intptr_t atPos) {
-   const bool ansi = NppMessage(NPPM_GETBUFFERENCODING, NppMessage(NPPM_GETCURRENTBUFFERID, 0, 0), 0) == 0;
-   GotoCore::cursorInfo([hScintilla](unsigned int message, uintptr_t w, intptr_t l) {
-      return SendMessage(hScintilla, message, w, l);
-   }, nb, ansi, line, column, atPos, cursorPosData);
+   UCHAR atChar;
+   intptr_t colPos;
+
+   string unicodeBlock(MAX_PATH, '\0');
+   string unicodeName(MAX_PATH, '\0');
+
+   colPos = SendMessage(hScintilla, SCI_GETCOLUMN, atPos, 0) + 1;
+   atChar = static_cast<UCHAR>(SendMessage(hScintilla, SCI_GETCHARAT, atPos, 0));
+
+   snprintf(cursorPosData, BUFFER_500, "%s%llu\n%s%llu\n%s%llu\n\n%s0x%X [%u]",
+      CUR_POS_DATA_LINE, static_cast<long long>(line),
+      CUR_POS_DATA_CHAR_COL, static_cast<long long>(colPos),
+      CUR_POS_DATA_BYTE_COL, static_cast<long long>(column),
+      CUR_POS_DATA_ANSI_BYTE, atChar, atChar);
+
+   if ((atChar & 0x80) == 0 || NppMessage(NPPM_GETBUFFERENCODING, NppMessage(NPPM_GETCURRENTBUFFERID, 0, 0), 0) == 0) {
+      nb.getUnicodeBlockAndName(atChar, unicodeBlock.data(), MAX_PATH, unicodeName.data(), MAX_PATH);
+      snprintf(cursorPosData, BUFFER_500, "%s\n%s%s\n%s", cursorPosData,
+         CUR_POS_DATA_UNICODE_BLOCK, unicodeBlock.c_str(), unicodeName.c_str());
+      return;
+   }
+
+   intptr_t utf8StartPos{ atPos };
+   UCHAR utf8StartChar{ atChar };
+
+   while ((utf8StartChar & 0xC0) == 0x80 && atPos - utf8StartPos < 3) {
+      utf8StartPos--;
+      utf8StartChar = static_cast<UCHAR>(SendMessage(hScintilla, SCI_GETCHARAT, utf8StartPos, 0));
+   }
+
+   if ((utf8StartChar & 0x40) == 0) {
+      snprintf(cursorPosData, BUFFER_500, "%s\n%s", cursorPosData, CUR_POS_DATA_INVALID_UTF8);
+      return;
+   }
+
+   UCHAR utf8ByteChar;
+   intptr_t utf8BytePos{ utf8StartPos };
+   int unicodeHead{ 0 }, unicodeTail{ 0 };
+   bool atMark;
+   char utf8Text[BUFFER_100];
+
+   atMark = (utf8StartPos == atPos);
+   snprintf(utf8Text, BUFFER_100, "%s%s0x%X%s", CUR_POS_DATA_UTF8_BYTES,
+      (atMark ? "<" : ""), utf8StartChar, (atMark ? ">" : ""));
+
+   if ((utf8StartChar & 0xC0) == 0xC0) {
+      atMark = (++utf8BytePos == atPos);
+      utf8ByteChar = static_cast<UCHAR>(SendMessage(hScintilla, SCI_GETCHARAT, utf8BytePos, 0));
+
+      snprintf(utf8Text, BUFFER_100, "%s %s0x%X%s", utf8Text,
+         (atMark ? "<" : ""), utf8ByteChar, (atMark ? ">" : ""));
+
+      unicodeHead = (utf8StartChar & 31) << 6;
+      unicodeTail = (utf8ByteChar & 63);
+   }
+
+   if ((utf8StartChar & 0xE0) == 0xE0) {
+      atMark = (++utf8BytePos == atPos);
+      utf8ByteChar = static_cast<UCHAR>(SendMessage(hScintilla, SCI_GETCHARAT, utf8BytePos, 0));
+
+      snprintf(utf8Text, BUFFER_100, "%s %s0x%X%s", utf8Text,
+         (atMark ? "<" : ""), utf8ByteChar, (atMark ? ">" : ""));
+
+      unicodeHead = (utf8StartChar & 15) << 12;
+      unicodeTail = (unicodeTail << 6) + (utf8ByteChar & 63);
+   }
+
+   if ((utf8StartChar & 0xF0) == 0xF0) {
+      atMark = (++utf8BytePos == atPos);
+      utf8ByteChar = static_cast<UCHAR>(SendMessage(hScintilla, SCI_GETCHARAT, utf8BytePos, 0));
+
+      atMark = (utf8BytePos == atPos);
+      snprintf(utf8Text, BUFFER_100, "%s %s0x%X%s", utf8Text,
+         (atMark ? "<" : ""), utf8ByteChar, (atMark ? ">" : ""));
+
+      unicodeHead = (utf8StartChar & 7) << 18;
+      unicodeTail = (unicodeTail << 6) + (utf8ByteChar & 63);
+   }
+
+   if (atPos > utf8BytePos) {
+      snprintf(cursorPosData, BUFFER_100, "%s\n%s", cursorPosData, CUR_POS_DATA_INVALID_UTF8);
+   }
+   else {
+      char unicodePoint[BUFFER_20];
+
+      snprintf(unicodePoint, BUFFER_20, "%X", (unicodeHead + unicodeTail));
+      snprintf(cursorPosData, BUFFER_500, "%s\n%s\n%sU+%s%s", cursorPosData, utf8Text,
+         CUR_POS_DATA_UNICODE, ((strlen(unicodePoint) % 2 == 0) ? "" : "0"), unicodePoint);
+   }
+
+   nb.getUnicodeBlockAndName((unicodeHead + unicodeTail), unicodeBlock.data(), MAX_PATH, unicodeName.data(), MAX_PATH);
+   snprintf(cursorPosData, BUFFER_500, "%s\n%s%s\n%s", cursorPosData,
+      CUR_POS_DATA_UNICODE_BLOCK, unicodeBlock.c_str(), unicodeName.c_str());
 }
 
 void GotoLineColPanel::loadCursorPosData() {

@@ -2,7 +2,20 @@
 
 #include "PluginDefinition.h"
 
-#include "../qt/Preferences.h"
+struct ALL_PREFERENCES {
+   int fillOnFocus = TRUE;
+   int fillOnTabChange = TRUE;
+   int showCalltip = TRUE;
+   int braceHilite = TRUE;
+   int useByteCol = TRUE;
+   int centerCaret = TRUE;
+   int edgeBuffer = 10;
+   int caretFlashSeconds = 3;
+   int showTooltip = TRUE;
+   int tooltipSeconds = 20;
+   int cmdProcHidden = TRUE;
+   int cmdProcPersist = FALSE;
+};
 
 const int PREFS_STR_MAX_LEN = 30;
 
