@@ -1,0 +1,6 @@
+<RCC><qresource prefix="/gotolinecol">
+<file alias="UnicodeBlocks.csv">../src/UnicodeData/UnicodeBlocks.csv</file>
+<file alias="UnicodeData.ini">../src/UnicodeData/UnicodeData.ini</file>
+<file alias="icon.ico">../src/Resources/dock_lite.ico</file>
+<file alias="dark.ico">../src/Resources/dock_dark.ico</file>
+</qresource></RCC>
